@@ -6,6 +6,17 @@
 #include "Statements.h"
 #include "BlockState.h"
 using namespace std;
+
+#define MAX_FUNC_STACKSIZE 0xFF
+
+enum AppendArrayType {
+	AAT_STACK = 0,
+	AAT_LITERAL = 1,
+	AAT_INT = 2,
+	AAT_FLOAT = 3,
+	AAT_BOOL = 4
+};
+
 const char* OpcodeNames[] = 
 {
 	"OP_LINE",
@@ -652,8 +663,21 @@ void NutFunction::DecompileStatement( VMState& state ) const
 			{
 				ExpressionPtr arrayExp = state.GetVar(arg0);
 				ExpressionPtr valueExp;
-				if (arg3 == 0xFF)
-					valueExp = state.GetLastVar();
+				if (arg3 == MAX_FUNC_STACKSIZE)
+				{
+					switch (arg2)
+					{
+						case AAT_LITERAL:
+							valueExp = ExpressionPtr(new ConstantExpression(m_Literals[arg1])); break;
+						case AAT_INT:
+							valueExp = ExpressionPtr(new ConstantExpression((unsigned int)arg1)); break;
+						case AAT_BOOL:
+							valueExp = ExpressionPtr(new LiteralConstantExpression((arg1 != 0) ? "true" : "false")); break;
+						case AAT_FLOAT:
+							valueExp = ExpressionPtr(new ConstantExpression(op.arg1_float)); break;
+						default: break;
+					}
+				}
 				else
 					valueExp = (arg3 != 0) ? ExpressionPtr(new ConstantExpression(m_Literals[arg1])) : state.GetVar(arg1);
 
