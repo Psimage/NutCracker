@@ -6,17 +6,6 @@
 #include "Statements.h"
 #include "BlockState.h"
 using namespace std;
-
-#define MAX_FUNC_STACKSIZE 0xFF
-
-enum AppendArrayType {
-	AAT_STACK = 0,
-	AAT_LITERAL = 1,
-	AAT_INT = 2,
-	AAT_FLOAT = 3,
-	AAT_BOOL = 4
-};
-
 const char* OpcodeNames[] = 
 {
 	"OP_LINE",
@@ -661,40 +650,7 @@ void NutFunction::DecompileStatement( VMState& state ) const
 
 		case OP_APPENDARRAY:
 			{
-				ExpressionPtr arrayExp = state.GetVar(arg0);
-				ExpressionPtr valueExp;
-				if (arg3 == MAX_FUNC_STACKSIZE)
-				{
-					switch (arg2)
-					{
-						case AAT_LITERAL:
-							valueExp = ExpressionPtr(new ConstantExpression(m_Literals[arg1])); break;
-						case AAT_INT:
-							valueExp = ExpressionPtr(new ConstantExpression((unsigned int)arg1)); break;
-						case AAT_BOOL:
-							valueExp = ExpressionPtr(new LiteralConstantExpression((arg1 != 0) ? "true" : "false")); break;
-						case AAT_FLOAT:
-							valueExp = ExpressionPtr(new ConstantExpression(op.arg1_float)); break;
-						default: break;
-					}
-				}
-				else
-					valueExp = (arg3 != 0) ? ExpressionPtr(new ConstantExpression(m_Literals[arg1])) : state.GetVar(arg1);
-
-				if (arrayExp->GetType() == Exp_NewArrayExpression)
-				{
-					static_pointer_cast<NewArrayExpression>(arrayExp)->AddElement(valueExp);
-					state.SetVar(arg0, arrayExp);
-				}
-				else
-				{
-					ExpressionPtr appendFunctionExp = ExpressionPtr(new ArrayIndexingExpression(arrayExp, ExpressionPtr(new ConstantExpression(L"append"))));
-					shared_ptr<FunctionCallExpression> callExp = shared_ptr<FunctionCallExpression>(new FunctionCallExpression(appendFunctionExp));
-					callExp->AddArgument(arrayExp);
-					callExp->AddArgument(valueExp);
-
-					state.PushStatement(StatementPtr(new ExpressionStatement(callExp)));
-				}
+				DecompileAppendArray(state, arg0, arg1, (AppendArrayType)arg2, arg3);
 			}
 			break;
 
@@ -1519,6 +1475,54 @@ void NutFunction::DecompileSwitchBlock( VMState& state ) const
 	state.PushStatement(StatementPtr(new SwitchStatement(switchVariable, switchBlock)));	
 }
 
+void NutFunction::DecompileAppendArray(VMState& state, int arg0, int arg1, AppendArrayType aat, int arg3) const
+{
+	ExpressionPtr arrayExp = state.GetVar(arg0);
+	ExpressionPtr valueExp;
+	union Target
+	{
+		unsigned int intVal;
+		float floatVal;
+	};
+
+	switch (aat)
+	{
+	case AAT_STACK:
+		valueExp = state.GetVar(arg1);
+		break;
+	case AAT_LITERAL:
+		valueExp = ExpressionPtr(new ConstantExpression(m_Literals[arg1]));
+		break;
+	case AAT_INT:
+	case AAT_BOOL:
+		valueExp = ExpressionPtr(new ConstantExpression(((Target*)&arg1)->intVal));
+		break;
+	case AAT_FLOAT:
+		valueExp = ExpressionPtr(new ConstantExpression(((Target*)&arg1)->floatVal));
+		break;
+	default:
+		if (arg3 == 0xFF)
+			valueExp = state.GetLastVar();
+		else
+			valueExp = (arg3 != 0) ? ExpressionPtr(new ConstantExpression(m_Literals[arg1])) : state.GetVar(arg1);
+		break;
+	}
+
+	if (arrayExp->GetType() == Exp_NewArrayExpression)
+	{
+		static_pointer_cast<NewArrayExpression>(arrayExp)->AddElement(valueExp);
+		state.SetVar(arg0, arrayExp);
+	}
+	else
+	{
+		ExpressionPtr appendFunctionExp = ExpressionPtr(new ArrayIndexingExpression(arrayExp, ExpressionPtr(new ConstantExpression(L"append"))));
+		shared_ptr<FunctionCallExpression> callExp = shared_ptr<FunctionCallExpression>(new FunctionCallExpression(appendFunctionExp));
+		callExp->AddArgument(arrayExp);
+		callExp->AddArgument(valueExp);
+
+		state.PushStatement(StatementPtr(new ExpressionStatement(callExp)));
+	}
+}
 
 // ***************************************************************************************************************
 void NutFunction::PrintOpcode(std::wostream& out, int pos, const Instruction& op ) const
