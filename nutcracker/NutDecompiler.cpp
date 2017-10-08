@@ -1,4 +1,5 @@
 ﻿#include "stdafx.h"
+#include <unordered_map>
 
 #include "NutScript.h"
 #include "Formatters.h"
@@ -114,17 +115,20 @@ public:
 		ExpressionPtr expression;
 		std::vector<StatementPtr> pendingStatements;
 	};
-
+	struct DoWhileBlockInfo
+	{
+		int beginPos;
+		int endPos;
+	};
 	typedef shared_ptr< std::vector<StackElement> > StackCopyPtr;
 
 private:
+	int m_IP;
 	const NutFunction& m_Parent;
 
 	BlockStatementPtr m_Block;
 	std::vector<StackElement> m_Stack;
-	std::vector<int> m_JNZInstructions;
-	int m_IP;
-
+	std::unordered_map<int, DoWhileBlockInfo> m_doWhileInfos;
 public:
 	BlockState m_BlockState;
 
@@ -137,26 +141,37 @@ public:
 		m_BlockState.blockStart = -1;
 		m_BlockState.blockEnd = parent.m_Instructions.size() + 2;
 
-// 		// Find all JNZ instructions in code with beck jump - this will be oure do..while loops
-// 		for( int i = 0; i < (int)parent.m_Instructions.size(); ++i)
-// 			if (parent.m_Instructions[i].op == OP_JNZ && parent.m_Instructions[i].arg1 < 0)
-// 				m_JNZInstructions.push_back(i);
+		PreprocessDoWhileInfo();
 	}
 
-	int PopJNZInstructionWithTarget( int address )
+	void PreprocessDoWhileInfo()
 	{
-		// Find last JNZ instruction that points at specified address (we need last to find
-		// outermost do..while block)
-
-		for( int i = (int)m_JNZInstructions.size() - 1; i >= 0; --i)
-			if ((m_JNZInstructions[i] + 1 + m_Parent.m_Instructions[m_JNZInstructions[i]].arg1) == address)
+		for (int i = 1; i < (int)m_Parent.m_Instructions.size(); ++i)
+		{
+			const NutFunction::Instruction& prevInst = m_Parent.m_Instructions[i - 1];
+			if (prevInst.op == OP_JCMP && prevInst.arg1 == 1)
 			{
-				int pos = m_JNZInstructions[i];
-				m_JNZInstructions.erase(m_JNZInstructions.begin() + i);
-				return pos;
+				const NutFunction::Instruction& curInst = m_Parent.m_Instructions[i];
+				if (curInst.op == OP_JMP && curInst.arg1 < 0)
+				{
+					DoWhileBlockInfo info = { 0 };
+					info.endPos = i + 1;
+					info.beginPos = info.endPos + curInst.arg1;
+					m_doWhileInfos[info.beginPos] = info;
+				}
 			}
+		}
+	}
 
-		return -1;
+	int PopDoWhileEndPos(int ip)
+	{
+		auto iter = m_doWhileInfos.find(ip);
+		if (iter == m_doWhileInfos.end())
+			return -1;
+
+		int endpos = iter->second.endPos;
+		m_doWhileInfos.erase(iter);
+		return endpos;
 	}
 
 	void NextInstruction( void )
@@ -478,11 +493,11 @@ public:
 // ***************************************************************************************************************
 void NutFunction::DecompileStatement( VMState& state ) const
 {
-	int jnz = state.PopJNZInstructionWithTarget(state.IP());
-	if (jnz > -1)
+	int doWhileEnd = state.PopDoWhileEndPos(state.IP());
+	if (doWhileEnd > -1)
 	{
 		// Found start of do...while loop
-		DecompileDoWhileLoop(state, jnz);
+		DecompileDoWhileLoop(state, doWhileEnd);
 		return;
 	}
 
@@ -633,7 +648,7 @@ void NutFunction::DecompileStatement( VMState& state ) const
 		// *** OP_JNZ should not be matched - processed in do...while decompilation
 
 		case OP_JCMP:
-			DecompileForLoop(state, arg0, arg1, arg2, arg3);
+			DecompileJCMP(state, arg0, arg1, arg2, arg3);
 			break;
 
 		case OP_JZ:
@@ -1243,28 +1258,34 @@ void NutFunction::DecompileJumpZeroInstruction( VMState& state, int arg0, int ar
 
 
 // ***************************************************************************************************************
-void NutFunction::DecompileDoWhileLoop( VMState& state, int jumpAddress ) const
+void NutFunction::DecompileDoWhileLoop( VMState& state, int endPos) const
 {
 	BlockState prevBlockState = state.m_BlockState;
 	state.m_BlockState.inLoop = BlockState::DoWhileLoop;
 	state.m_BlockState.inSwitch = 0;
 	state.m_BlockState.blockStart = state.IP();
-	state.m_BlockState.blockEnd = jumpAddress;
+	state.m_BlockState.blockEnd = endPos - 1;
 	state.m_BlockState.parent = &prevBlockState;
 
 	BlockStatementPtr block = state.PushBlock();
 	ExpressionPtr condition;
 
-	int destIp = jumpAddress + 1;
-	while(state.IP() < destIp && !state.EndOfInstructions())
+	while (state.IP() < endPos && !state.EndOfInstructions())
 	{
-// 		if (state.IP() == jumpAddress && m_Instructions[state.IP()].op == OP_JNZ)
-// 		{
-// 			// Last jump instruction
-// 			condition = state.GetVar( static_cast<unsigned char>(m_Instructions[state.IP()].arg0) );
-// 			state.NextInstruction();
-// 		}
-// 		else
+		if (state.IP() == endPos - 2 && m_Instructions[state.IP()].op == OP_JCMP)
+		{
+			const Instruction& jcmp = m_Instructions[state.IP()];
+			unsigned char condVar = static_cast<unsigned char>(jcmp.arg0);
+			unsigned char iterVar = static_cast<unsigned char>(jcmp.arg2);
+			unsigned char cmpOp = static_cast<unsigned char>(jcmp.arg3);
+
+			ExpressionPtr iterExp = state.GetVar(iterVar);
+			condition = ExpressionPtr(new BinaryOperatorExpression(ComparisionOpcodeNames[cmpOp], iterExp, state.GetVar(condVar)));
+			// skip OP_JCMP & OP_JMP
+			state.NextInstruction();
+			state.NextInstruction();
+		}
+		else
 		{
 			DecompileStatement(state);
 		}
@@ -1278,10 +1299,10 @@ void NutFunction::DecompileDoWhileLoop( VMState& state, int jumpAddress ) const
 	state.m_BlockState = prevBlockState;
 }
 
-void NutFunction::DecompileForLoop(VMState& state, int end, int offsetIp, int iter, int cmpOp) const
+void NutFunction::DecompileJCMP(VMState& state, int condVar, int offsetIp, int iterVar, int cmpOp) const
 {
-	ExpressionPtr iterExp = state.GetVar(iter);
-	ExpressionPtr conditionExp = ExpressionPtr(new BinaryOperatorExpression(ComparisionOpcodeNames[cmpOp], iterExp, state.GetVar(end)));
+	ExpressionPtr iterExp = state.GetVar(iterVar);
+	ExpressionPtr conditionExp = ExpressionPtr(new BinaryOperatorExpression(ComparisionOpcodeNames[cmpOp], iterExp, state.GetVar(condVar)));
 
 	BlockStatementPtr block = state.PushBlock();
 
@@ -1296,12 +1317,22 @@ void NutFunction::DecompileForLoop(VMState& state, int end, int offsetIp, int it
 	int loopEndIp = state.IP() + offsetIp;
 
 	// Decompile loop block
+	bool bHasEndingJump = false;
+	int elseEnd = 0;
+	VMState::StackCopyPtr stackCopy = state.CloneStack();
+
 	while (!state.EndOfInstructions() && state.IP() < loopEndIp)
 	{
-		if (state.IP() == (loopEndIp - 1) && m_Instructions[state.IP()].op == OP_JMP && m_Instructions[state.IP()].arg1 < 1)
+		if (state.IP() == (loopEndIp - 1) && m_Instructions[state.IP()].op == OP_JMP)
 		{
 			// Skip loop ending JMP
+			int jmpOffset = m_Instructions[state.IP()].arg1;
 			state.NextInstruction();
+
+			if (jmpOffset < 1)
+				bHasEndingJump = true;
+			else
+				elseEnd = state.IP() + jmpOffset;
 		}
 		else
 		{
@@ -1309,13 +1340,43 @@ void NutFunction::DecompileForLoop(VMState& state, int end, int offsetIp, int it
 		}
 	}
 	
-	LoopBaseStatementPtr stat = LoopBaseStatementPtr(new ForStatement(nullptr, conditionExp, nullptr, state.PopBlock(block)));
-	stat->SetLoopBlock(state.m_BlockState);
+	if (bHasEndingJump)
+	{
+		LoopBaseStatementPtr stat = LoopBaseStatementPtr(new ForStatement(nullptr, conditionExp, nullptr, state.PopBlock(block)));
+		stat->SetLoopBlock(state.m_BlockState);
 
-	// Pop block state
-	state.m_BlockState = prevBlockState;
+		// Pop block state
+		state.m_BlockState = prevBlockState;
 
-	state.PushStatement(stat);
+		state.PushStatement(stat);
+	}
+	else // may be if-else
+	{
+		state.m_BlockState.inLoop = 0;
+
+		BlockStatementPtr ifStat = state.PopBlock(block);
+		BlockStatementPtr elseStat = nullptr;
+		if (elseEnd > state.IP())
+		{
+			state.m_BlockState.blockStart = state.IP();
+			state.m_BlockState.blockEnd = elseEnd;
+
+			BlockStatementPtr block = state.PushBlock();
+			state.SwapStacks(stackCopy);
+			while (!state.EndOfInstructions() && state.IP() < elseEnd)
+			{
+				DecompileStatement(state);
+			}
+			elseStat = state.PopBlock(block);
+		}
+
+		StatementPtr stat = StatementPtr(new IfStatement(conditionExp, ifStat, elseStat));
+
+		// Pop block state
+		state.m_BlockState = prevBlockState;
+
+		state.PushStatement(stat);
+	}
 }
 
 // ***************************************************************************************************************
